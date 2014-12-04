@@ -26,6 +26,7 @@ class WalletBackupTest (BitcoinTestFramework):
         self.nodes = start_nodes(4, self.options.tmpdir, extra_args)
         connect_nodes(self.nodes[0], 3)
         connect_nodes(self.nodes[1], 3)
+        connect_nodes(self.nodes[2], 3)
         connect_nodes(self.nodes[2], 0)
         self.is_network_split=False
         self.sync_all()
@@ -62,6 +63,7 @@ class WalletBackupTest (BitcoinTestFramework):
         self.nodes[2] = start_node(2, self.options.tmpdir)
         connect_nodes(self.nodes[0], 3)
         connect_nodes(self.nodes[1], 3)
+        connect_nodes(self.nodes[2], 3)
         connect_nodes(self.nodes[2], 0)
 
     def stop_three(self):
