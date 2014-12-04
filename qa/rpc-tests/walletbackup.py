@@ -11,7 +11,7 @@
 from test_framework import BitcoinTestFramework
 from util import *
 from random import randint
-from shutil import rmtree, copyfile
+import time
 
 class WalletBackupTest (BitcoinTestFramework):
 
@@ -20,28 +20,19 @@ class WalletBackupTest (BitcoinTestFramework):
         initialize_chain_clean(self.options.tmpdir, 4)
 
     def setup_network(self, split=False):
-        self.nodes = start_nodes(4, self.options.tmpdir)
-        connect_nodes_bi(self.nodes,0,1)
-        connect_nodes_bi(self.nodes,1,2)
-        connect_nodes_bi(self.nodes,2,3)
+        # nodes 1, 2,3 are spenders, let's give them a keypool=100
+        # node 3 is the miner, give him keypool=1 (hard-coded into the utility function)
+        extra_args = [["-keypool=100"], ["-keypool=100"], ["-keypool=100"], []]
+        self.nodes = start_nodes(4, self.options.tmpdir, extra_args)
+        connect_nodes(self.nodes[0], 3)
+        connect_nodes(self.nodes[1], 3)
+        connect_nodes(self.nodes[2], 0)
         self.is_network_split=False
         self.sync_all()
 
     def stop_all(self):
         stop_nodes(self.nodes[0:4])
         wait_bitcoinds()
-
-    def remove_node3_chain(self):
-        # set node 3 (2 with zero indexing) to have no chain
-        regtestdir = os.path.join(self.options.tmpdir, "node"+str(2), "regtest")
-        shutil.rmtree(os.path.join(regtestdir, "blocks"))
-        shutil.rmtree(os.path.join(regtestdir, "chainstate"))
-
-    def print_balances(self):
-        print "node0: ", self.nodes[0].getbalance()
-        print "node1: ", self.nodes[1].getbalance()
-        print "node2: ", self.nodes[2].getbalance()
-        print "node3: ", self.nodes[3].getbalance()
 
     def one_send(self, from_node, to_address):
         if (randint(1,2) == 1):
@@ -61,18 +52,31 @@ class WalletBackupTest (BitcoinTestFramework):
         self.one_send(2, a1)
 
         # Have the miner (node3) mine a block.
-        # Must sync mempools so that the miner knows about the transactions.
+        # Must sync mempools before mining.
         sync_mempools(self.nodes)
         self.nodes[3].setgenerate(True, 1)
 
-    def run_test (self):
-        # Test case involves 4 nodes.
-        # 1 2 3 and send transactions between each other,
-        # 4 is a miner.
+    def start_three(self):
+        self.nodes[0] = start_node(0, self.options.tmpdir)
+        self.nodes[1] = start_node(1, self.options.tmpdir)
+        self.nodes[2] = start_node(2, self.options.tmpdir)
+        connect_nodes(self.nodes[0], 3)
+        connect_nodes(self.nodes[1], 3)
+        connect_nodes(self.nodes[2], 0)
 
-        # 1 2 3 and each mine a block to start, then
-        # miner creates 100 blocks so 1 2 3 each have 50 mature
-        # coins to spend.
+    def stop_three(self):
+        stop_node(self.nodes[0], 0)
+        stop_node(self.nodes[1], 1)
+        stop_node(self.nodes[2], 2)
+
+    def erase_three(self):
+        os.remove(self.options.tmpdir + "/node0/regtest/wallet.dat")
+        os.remove(self.options.tmpdir + "/node1/regtest/wallet.dat")
+        os.remove(self.options.tmpdir + "/node2/regtest/wallet.dat")
+
+    def run_test (self):
+
+        print "Generating initial blockchain..."
         self.nodes[0].setgenerate(True, 1)
         self.sync_all()
         self.nodes[1].setgenerate(True, 1)
@@ -82,22 +86,17 @@ class WalletBackupTest (BitcoinTestFramework):
         self.nodes[3].setgenerate(True, 100)
         self.sync_all()
 
-        def assert_balances(nodes, balances):
-            for i, node in enumerate(nodes):
-                assert_equal(node.getbalance(), balances[i])
+        assert_equal(self.nodes[0].getbalance(), 50)
+        assert_equal(self.nodes[1].getbalance(), 50)
+        assert_equal(self.nodes[2].getbalance(), 50)
+        assert_equal(self.nodes[3].getbalance(), 0)
 
-        assert_balances(self.nodes, [50]*3 + [0])
-        print "Balances after initialization"
-        self.print_balances()
-
-        # Five rounds of the spenders sending each other transactions.
-        print "Creating first set of 5 rounds of transactions..."
+        print "Creating transactions..."
+        # Five rounds of sending each other transactions.
         for i in range(5):
             self.do_one_round()
-        print "Balances after first set of txns..."
-        self.print_balances()
 
-        #Backing up..."
+        print "Backing up..."
         tmpdir = self.options.tmpdir
         self.nodes[0].backupwallet(tmpdir + "/node0/wallet.bak")
         self.nodes[0].dumpwallet(tmpdir + "/node0/wallet.dump")
@@ -106,75 +105,73 @@ class WalletBackupTest (BitcoinTestFramework):
         self.nodes[2].backupwallet(tmpdir + "/node2/wallet.bak")
         self.nodes[2].dumpwallet(tmpdir + "/node2/wallet.dump")
 
-        # Then another set of 5 rounds of transactions.
-        print "Creating second set of 5 rounds of transactions..."
+        print "More transactions..."
         for i in range(5):
             self.do_one_round()
-        print "Balances after second set of txns..."
-        self.print_balances()
-
 
         # Generate 101 more blocks, so any fees paid mature
         self.nodes[3].setgenerate(True, 101)
+        self.sync_all()
 
         balance0 = self.nodes[0].getbalance()
         balance1 = self.nodes[1].getbalance()
         balance2 = self.nodes[2].getbalance()
         balance3 = self.nodes[3].getbalance()
         total = balance0 + balance1 + balance2 + balance3
-        print "Total: ", total
-        self.print_balances()
+
+        # At this point, there are 214 blocks (103 for setup, then 10 rounds, then 101.)
+        # 114 are mature, so the sum of all wallets should be 114 * 50 = 5700.
+        assert_equal(total, 5700)
 
         ##
         # Test restoring spender wallets from backups
         ##
+        print "Restoring using wallet.dat.."
 
-        self.stop_all()
-        os.remove(tmpdir + "/node0/regtest/wallet.dat")
-        os.remove(tmpdir + "/node1/regtest/wallet.dat")
-        os.remove(tmpdir + "/node2/regtest/wallet.dat")
-        # erasing node3's blockchain to ensure that when a node is recovered it
-        # will correctly get the blockchain from the network if needed.
-        self.remove_node3_chain()
+        self.stop_three()
+        self.erase_three()
 
-        # restore wallets from backup
-        for i in range(3):
-            backup = tmpdir + "/node" + str(i) + "/wallet.bak"
-            wallet = tmpdir + "/node" + str(i) + "/regtest/wallet.dat"
-            print "copying", backup, wallet
-            shutil.copyfile(backup, wallet)
+        # Start node2 with no chain
+        shutil.rmtree(self.options.tmpdir + "/node2/regtest/blocks")
+        shutil.rmtree(self.options.tmpdir + "/node2/regtest/chainstate")
 
-        self.setup_network()
-        sync_blocks(self.nodes)
-        print "Balances after restoration of spender wallets from backups and restart"
-        self.print_balances()
+        # Restore wallets from backup
+        shutil.copyfile(tmpdir + "/node0/wallet.bak", tmpdir + "/node0/regtest/wallet.dat")
+        shutil.copyfile(tmpdir + "/node1/wallet.bak", tmpdir + "/node1/regtest/wallet.dat")
+        shutil.copyfile(tmpdir + "/node2/wallet.bak", tmpdir + "/node2/regtest/wallet.dat")
 
-        ##
-        # Test restoring spender wallets via importing dumps
-        ##
-
-        self.stop_all()
-        for i in range(3):
-            wallet = tmpdir + "/node" + str(i) + "/regtest/wallet.dat"
-            os.remove(wallet)
-        self.remove_node3_chain()
-        self.setup_network()
+        print "Re-starting nodes.."
+        self.start_three()
         sync_blocks(self.nodes)
 
-        print "Balances after erasure of spender wallets and restart"
-        self.print_balances()
+        assert_equal(self.nodes[0].getbalance(), balance0)
+        assert_equal(self.nodes[1].getbalance(), balance1)
+        assert_equal(self.nodes[2].getbalance(), balance2)
 
-        # import spender wallets from dumps
-        for i, node in enumerate(self.nodes[0:3]):
-            dump = tmpdir + "/node" + str(i) + "/wallet.dump"
-            print dump
-            node.importwallet(dump)
+        print "Restoring using dumped wallet.."
+        self.stop_three()
+        self.erase_three()
+
+        #start node2 with no chain
+        shutil.rmtree(self.options.tmpdir + "/node2/regtest/blocks")
+        shutil.rmtree(self.options.tmpdir + "/node2/regtest/chainstate")
+
+        self.start_three()
+
+        assert_equal(self.nodes[0].getbalance(), 0)
+        assert_equal(self.nodes[1].getbalance(), 0)
+        assert_equal(self.nodes[2].getbalance(), 0)
+
+        self.nodes[0].importwallet(tmpdir + "/node0/wallet.dump")
+        self.nodes[1].importwallet(tmpdir + "/node1/wallet.dump")
+        self.nodes[2].importwallet(tmpdir + "/node2/wallet.dump")
+
         sync_blocks(self.nodes)
 
-        print "Balances after importing spender wallets"
-        self.print_balances()
+        assert_equal(self.nodes[0].getbalance(), balance0)
+        assert_equal(self.nodes[1].getbalance(), balance1)
+        assert_equal(self.nodes[2].getbalance(), balance2)
 
-        assert_equal(5700, sum([node.getbalance() for node in self.nodes]))
 
 
 if __name__ == '__main__':
